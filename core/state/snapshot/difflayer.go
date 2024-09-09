@@ -76,6 +76,7 @@ var (
 	bloomDestructHasherOffset = 0
 	bloomAccountHasherOffset  = 0
 	bloomStorageHasherOffset  = 0
+	bloomProofHasherOffset    = 0
 )
 
 func init() {
@@ -118,6 +119,8 @@ type diffLayer struct {
 	accountData map[common.Hash][]byte                 // Keyed accounts for direct retrieval (nil means deleted)
 	storageList map[common.Hash][]common.Hash          // List of storage slots for iterated retrievals, one per account. Any existing lists are sorted if non-nil
 	storageData map[common.Hash]map[common.Hash][]byte // Keyed storage slots for direct retrieval. one per account (nil means deleted)
+	proofList   map[common.Hash][]common.Hash          // List of proof slots for iterated retrievals, one per account. Any existing lists are sorted if non-nil
+	proofData   map[common.Hash]map[common.Hash][]byte // Keyed proof slots for direct retrieval. one per account (nil means deleted)
 
 	diffed *bloomfilter.Filter // Bloom filter tracking all the diffed items up to the disk layer
 
@@ -140,9 +143,15 @@ func storageBloomHash(h0, h1 common.Hash) uint64 {
 		binary.BigEndian.Uint64(h1[bloomStorageHasherOffset:bloomStorageHasherOffset+8])
 }
 
+// proofBloomHash is used to convert an account hash and a proof hash into a 64 bit mini hash.
+func proofBloomHash(h0, h1 common.Hash) uint64 {
+	return binary.BigEndian.Uint64(h0[bloomProofHasherOffset:bloomProofHasherOffset+8]) ^
+		binary.BigEndian.Uint64(h1[bloomProofHasherOffset:bloomProofHasherOffset+8])
+}
+
 // newDiffLayer creates a new diff on top of an existing snapshot, whether that's a low
 // level persistent database or a hierarchical diff already.
-func newDiffLayer(parent snapshot, root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte) *diffLayer {
+func newDiffLayer(parent snapshot, root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte, proofs map[common.Hash]map[common.Hash][]byte) *diffLayer {
 	// Create the new layer with some pre-allocated data segments
 	dl := &diffLayer{
 		parent:      parent,
@@ -151,6 +160,8 @@ func newDiffLayer(parent snapshot, root common.Hash, destructs map[common.Hash]s
 		accountData: accounts,
 		storageData: storage,
 		storageList: make(map[common.Hash][]common.Hash),
+		proofData:   proofs,
+		proofList:   make(map[common.Hash][]common.Hash),
 	}
 	switch parent := parent.(type) {
 	case *diskLayer:
@@ -177,6 +188,16 @@ func newDiffLayer(parent snapshot, root common.Hash, destructs map[common.Hash]s
 		for _, data := range slots {
 			dl.memory += uint64(common.HashLength + len(data))
 			snapshotDirtyStorageWriteMeter.Mark(int64(len(data)))
+		}
+	}
+	for accountHash, proofs := range proofs {
+		if proofs == nil {
+			panic(fmt.Sprintf("proofs %#x nil", accountHash))
+		}
+		// Determine memory size and track the dirty writes
+		for _, proof := range proofs {
+			dl.memory += uint64(common.HashLength + len(proof))
+			snapshotDirtyProofWriteMeter.Mark(int64(len(proof)))
 		}
 	}
 	dl.memory += uint64(len(destructs) * common.HashLength)
@@ -214,6 +235,11 @@ func (dl *diffLayer) rebloom(origin *diskLayer) {
 	for accountHash, slots := range dl.storageData {
 		for storageHash := range slots {
 			dl.diffed.AddHash(storageBloomHash(accountHash, storageHash))
+		}
+	}
+	for accountHash, proofs := range dl.proofData {
+		for proofHash := range proofs {
+			dl.diffed.AddHash(proofBloomHash(accountHash, proofHash))
 		}
 	}
 	// Calculate the current false positive rate and update the error rate meter.
@@ -408,10 +434,82 @@ func (dl *diffLayer) storage(accountHash, storageHash common.Hash, depth int) ([
 	return dl.parent.Storage(accountHash, storageHash)
 }
 
+func (dl *diffLayer) Proof(accountHash, proofHash common.Hash) ([]byte, error) {
+	// Check the bloom filter first whether there's even a point in reaching into
+	// all the maps in all the layers below
+	dl.lock.RLock()
+	// Check staleness before reaching further.
+	if dl.Stale() {
+		dl.lock.RUnlock()
+		return nil, ErrSnapshotStale
+	}
+	hit := dl.diffed.ContainsHash(proofBloomHash(accountHash, proofHash))
+	if !hit {
+		hit = dl.diffed.ContainsHash(destructBloomHash(accountHash))
+	}
+	var origin *diskLayer
+	if !hit {
+		origin = dl.origin // extract origin while holding the lock
+	}
+	dl.lock.RUnlock()
+
+	// If the bloom filter misses, don't even bother with traversing the memory
+	// diff layers, reach straight into the bottom persistent disk layer
+	if origin != nil {
+		snapshotBloomProofMissMeter.Mark(1)
+		return origin.Proof(accountHash, proofHash)
+	}
+	// The bloom filter hit, start poking in the internal maps
+	return dl.proof(accountHash, proofHash, 0)
+}
+
+// proof is an internal version of Proof that skips the bloom filter checks
+// and uses the internal maps to try and retrieve the data. It's meant  to be
+// used if a higher layer's bloom filter hit already.
+func (dl *diffLayer) proof(accountHash, proofHash common.Hash, depth int) ([]byte, error) {
+	dl.lock.RLock()
+	defer dl.lock.RUnlock()
+
+	// If the layer was flattened into, consider it invalid (any live reference to
+	// the original should be marked as unusable).
+	if dl.Stale() {
+		return nil, ErrSnapshotStale
+	}
+	// If the account is known locally, try to resolve the slot locally
+	if proofs, ok := dl.proofData[accountHash]; ok {
+		if data, ok := proofs[proofHash]; ok {
+			snapshotDirtyProofHitMeter.Mark(1)
+			snapshotDirtyProofHitDepthHist.Update(int64(depth))
+			if n := len(data); n > 0 {
+				snapshotDirtyProofReadMeter.Mark(int64(n))
+			} else {
+				snapshotDirtyProofInexMeter.Mark(1)
+			}
+			snapshotBloomProofTrueHitMeter.Mark(1)
+			return data, nil
+		}
+	}
+	// If the account is known locally, but deleted, return an empty slot
+	if _, ok := dl.destructSet[accountHash]; ok {
+		snapshotDirtyProofHitMeter.Mark(1)
+		snapshotDirtyProofHitDepthHist.Update(int64(depth))
+		snapshotDirtyProofInexMeter.Mark(1)
+		snapshotBloomProofTrueHitMeter.Mark(1)
+		return nil, nil
+	}
+	// Proof slot unknown to this diff, resolve from parent
+	if diff, ok := dl.parent.(*diffLayer); ok {
+		return diff.proof(accountHash, proofHash, depth+1)
+	}
+	// Failed to resolve through diff layers, mark a bloom error and use the disk
+	snapshotBloomProofFalseHitMeter.Mark(1)
+	return dl.parent.Proof(accountHash, proofHash)
+}
+
 // Update creates a new layer on top of the existing snapshot diff tree with
 // the specified data items.
-func (dl *diffLayer) Update(blockRoot common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte) *diffLayer {
-	return newDiffLayer(dl, blockRoot, destructs, accounts, storage)
+func (dl *diffLayer) Update(blockRoot common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte, proofs map[common.Hash]map[common.Hash][]byte) *diffLayer {
+	return newDiffLayer(dl, blockRoot, destructs, accounts, storage, proofs)
 }
 
 // flatten pushes all data from this point downwards, flattening everything into
@@ -467,6 +565,8 @@ func (dl *diffLayer) flatten() snapshot {
 		accountData: parent.accountData,
 		storageData: parent.storageData,
 		storageList: make(map[common.Hash][]common.Hash),
+		proofData:   parent.proofData,
+		proofList:   make(map[common.Hash][]common.Hash),
 		diffed:      dl.diffed,
 		memory:      parent.memory + dl.memory,
 	}
@@ -540,4 +640,35 @@ func (dl *diffLayer) StorageList(accountHash common.Hash) ([]common.Hash, bool) 
 	dl.storageList[accountHash] = storageList
 	dl.memory += uint64(len(dl.storageList)*common.HashLength + common.HashLength)
 	return storageList, destructed
+}
+
+// ProofList returns a sorted list of all proof hashes in this diffLayer for the given account.
+func (dl *diffLayer) ProofList(accountHash common.Hash) ([]common.Hash, bool) {
+	dl.lock.RLock()
+	_, destructed := dl.destructSet[accountHash]
+	if _, ok := dl.proofData[accountHash]; !ok {
+		// Account not tracked by this layer
+		dl.lock.RUnlock()
+		return nil, destructed
+	}
+	// If an old list already exists, return it
+	if list, exist := dl.proofList[accountHash]; exist {
+		dl.lock.RUnlock()
+		return list, destructed // the cached list can't be nil
+	}
+	dl.lock.RUnlock()
+
+	// No old sorted account list exists, generate a new one
+	dl.lock.Lock()
+	defer dl.lock.Unlock()
+
+	proofMap := dl.proofData[accountHash]
+	proofList := make([]common.Hash, 0, len(proofMap))
+	for k := range proofMap {
+		proofList = append(proofList, k)
+	}
+	slices.SortFunc(proofList, common.Hash.Cmp)
+	dl.proofList[accountHash] = proofList
+	dl.memory += uint64(len(dl.proofList)*common.HashLength + common.HashLength)
+	return proofList, destructed
 }

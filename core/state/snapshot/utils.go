@@ -75,7 +75,7 @@ func checkDanglingDiskStorage(chaindb ethdb.KeyValueStore) error {
 func checkDanglingMemStorage(db ethdb.KeyValueStore) error {
 	start := time.Now()
 	log.Info("Checking dangling journalled storage")
-	err := iterateJournal(db, func(pRoot, root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte) error {
+	err := iterateJournal(db, func(pRoot, root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte, proofs map[common.Hash]map[common.Hash][]byte) error {
 		for accHash := range storage {
 			if _, ok := accounts[accHash]; !ok {
 				log.Error("Dangling storage - missing account", "account", fmt.Sprintf("%#x", accHash), "root", root)
@@ -119,12 +119,13 @@ func CheckJournalAccount(db ethdb.KeyValueStore, hash common.Hash) error {
 	}
 	var depth = 0
 
-	return iterateJournal(db, func(pRoot, root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte) error {
+	return iterateJournal(db, func(pRoot, root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte, proofs map[common.Hash]map[common.Hash][]byte) error {
 		_, a := accounts[hash]
 		_, b := destructs[hash]
 		_, c := storage[hash]
+		_, d := proofs[hash]
 		depth++
-		if !a && !b && !c {
+		if !a && !b && !c && !d {
 			return nil
 		}
 		fmt.Printf("Disklayer+%d: Root: %x, parent %x\n", depth, root, pRoot)
@@ -143,6 +144,12 @@ func CheckJournalAccount(db ethdb.KeyValueStore, hash common.Hash) error {
 		}
 		if data, ok := storage[hash]; ok {
 			fmt.Printf("\tStorage\n")
+			for k, v := range data {
+				fmt.Printf("\t\t%x: %x\n", k, v)
+			}
+		}
+		if data, ok := proofs[hash]; ok {
+			fmt.Printf("\tProofs\n")
 			for k, v := range data {
 				fmt.Printf("\t\t%x: %x\n", k, v)
 			}

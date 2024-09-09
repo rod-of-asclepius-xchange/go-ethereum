@@ -67,6 +67,16 @@ type StorageIterator interface {
 	Slot() []byte
 }
 
+// ProofIterator is an iterator to step over the proof of a specific storage in a snapshot,
+// which may or may not be composed of multiple layers.
+type ProofIterator interface {
+	Iterator
+
+	// Proof returns the proof slot of the iterator is currently at. An error will
+	// be returned if the iterator becomes invalid
+	Slot() []byte
+}
+
 // diffAccountIterator is an account iterator that steps over the accounts (both
 // live and deleted) contained within a single diff layer. Higher order iterators
 // will use the deleted accounts to skip deeper iterators.
@@ -327,6 +337,89 @@ func (it *diffStorageIterator) Slot() []byte {
 // Release is a noop for diff account iterators as there are no held resources.
 func (it *diffStorageIterator) Release() {}
 
+// diffProofIterator is a proof iterator that steps over the specific proof
+// contained within a single diff layer.
+type diffProofIterator struct {
+	layer   *diffLayer
+	account common.Hash
+	keys    []common.Hash
+	curHash common.Hash
+	fail    error
+}
+
+// ProofIterator creates a proof iterator over a single diff layer.
+// Except the storage iterator is returned, there is an additional flag
+// "destructed" returned. If it's true then it means the whole storage is
+// destructed in this layer(maybe recreated too), don't bother deeper layer
+// for storage retrieval.
+func (dl *diffLayer) ProofIterator(account common.Hash, seek common.Hash) (ProofIterator, bool) {
+	// Create the storage for this account even it's marked
+	// as destructed. The iterator is for the new one which
+	// just has the same address as the deleted one.
+	hashes, destructed := dl.StorageList(account)
+	index := sort.Search(len(hashes), func(i int) bool {
+		return bytes.Compare(seek[:], hashes[i][:]) <= 0
+	})
+	// Assemble and returned the already seeked iterator
+	return &diffProofIterator{
+		layer:   dl,
+		account: account,
+		keys:    hashes[index:],
+	}, destructed
+}
+
+// Next steps the iterator forward one element, returning false if exhausted.
+func (it *diffProofIterator) Next() bool {
+	// If the iterator was already exhausted, don't bother
+	if len(it.keys) == 0 {
+		return false
+	}
+	// Iterator still has keys left, set the next one
+	it.curHash = it.keys[0]
+	it.keys = it.keys[1:]
+	return true
+}
+
+// Error returns any failure that occurred during iteration, which might have
+// caused a premature iteration exit (e.g. snapshot stack becoming stale).
+func (it *diffProofIterator) Error() error {
+	return it.fail
+}
+
+// Hash returns the hash of the proof slot the iterator is currently at.
+func (it *diffProofIterator) Hash() common.Hash {
+	return it.curHash
+}
+
+// Slot returns the raw proof slot value the iterator is currently at.
+// This method may _fail_, if the underlying layer has been flattened between
+// the call to Next and Value. That type of error will set it.Err.
+// This method assumes that flattening does not delete elements from
+// the proof mapping (writing nil into it is fine though), and will panic
+// if elements have been deleted.
+//
+// Note the returned slot is not a copy, please don't modify it.
+func (it *diffProofIterator) Slot() []byte {
+	it.layer.lock.RLock()
+	proofs, ok := it.layer.proofData[it.account]
+	if !ok {
+		panic(fmt.Sprintf("iterator referenced non-existent account proof: %x", it.account))
+	}
+	// Proof slot might be nil(deleted), but it must exist
+	blob, ok := proofs[it.curHash]
+	if !ok {
+		panic(fmt.Sprintf("iterator referenced non-existent proof slot: %x", it.curHash))
+	}
+	it.layer.lock.RUnlock()
+	if it.layer.Stale() {
+		it.fail, it.keys = ErrSnapshotStale, nil
+	}
+	return blob
+}
+
+// Release is a noop for diff proof iterators as there are no held resources.
+func (it *diffProofIterator) Release() {}
+
 // diskStorageIterator is a storage iterator that steps over the live storage
 // contained within a disk layer.
 type diskStorageIterator struct {
@@ -392,6 +485,74 @@ func (it *diskStorageIterator) Slot() []byte {
 
 // Release releases the database snapshot held during iteration.
 func (it *diskStorageIterator) Release() {
+	// The iterator is auto-released on exhaustion, so make sure it's still alive
+	if it.it != nil {
+		it.it.Release()
+		it.it = nil
+	}
+}
+
+type diskProofIterator struct {
+	it   ethdb.Iterator
+	hash common.Hash
+}
+
+// ProofIterator creates a proof iterator over a disk layer.
+// If the whole storage is destructed, then all entries in the disk
+// layer are deleted already. So the "destructed" flag returned here
+// is always false.
+func (dl *diskLayer) ProofIterator(account common.Hash, seek common.Hash) (ProofIterator, bool) {
+	pos := common.TrimRightZeroes(seek[:])
+	return &diskProofIterator{
+		it:   dl.diskdb.NewIterator(append(rawdb.SnapshotProofPrefix, account.Bytes()...), pos),
+		hash: account,
+	}, false
+}
+
+// Next moves the iterator to the next key-value entry.
+func (it *diskProofIterator) Next() bool {
+	// If the iterator was already exhausted, don't bother
+	if it.it == nil {
+		return false
+	}
+	// Try to advance the iterator and release it if we reached the end
+	for {
+		if !it.it.Next() {
+			it.it.Release()
+			it.it = nil
+			return false
+		}
+		if len(it.it.Key()) == len(rawdb.SnapshotProofPrefix)+common.HashLength+common.HashLength {
+			break
+		}
+	}
+	return true
+}
+
+// Error returns any failure that occurred during iteration, which might have
+// caused a premature iteration exit (e.g. snapshot stack becoming stale).
+//
+// A diff layer is immutable after creation content wise and can always be fully
+// iterated without error, so this method always returns nil.
+func (it *diskProofIterator) Error() error {
+	if it.it == nil {
+		return nil // Iterator is exhausted and released
+	}
+	return it.it.Error()
+}
+
+// Hash returns the hash of the proof slot the iterator is currently at.
+func (it *diskProofIterator) Hash() common.Hash {
+	return common.BytesToHash(it.it.Key()) // The prefix will be truncated
+}
+
+// Slot returns the raw proof slot content the iterator is currently at.
+func (it *diskProofIterator) Slot() []byte {
+	return it.it.Value()
+}
+
+// Release releases the database snapshot held during iteration.
+func (it *diskProofIterator) Release() {
 	// The iterator is auto-released on exhaustion, so make sure it's still alive
 	if it.it != nil {
 		it.it.Release()

@@ -113,6 +113,18 @@ func (t *StateTrie) GetStorage(_ common.Address, key []byte) ([]byte, error) {
 	return content, err
 }
 
+// GetProof attempts to retrieve a proof with provided account address and key.
+// If the specified proof is not in the trie, nil will be returned.
+// If a trie node is not found in the database, a MissingNodeError is returned.
+func (t *StateTrie) GetProof(_ common.Address, key []byte) ([]byte, error) {
+	enc, err := t.trie.Get(t.hashKey(key))
+	if err != nil || len(enc) == 0 {
+		return nil, err
+	}
+	_, content, _, err := rlp.Split(enc)
+	return content, err
+}
+
 // GetAccount attempts to retrieve an account with provided account address.
 // If the specified account is not in the trie, nil will be returned.
 // If a trie node is not found in the database, a MissingNodeError is returned.
@@ -181,6 +193,23 @@ func (t *StateTrie) UpdateStorage(_ common.Address, key, value []byte) error {
 	return nil
 }
 
+// UpdateProof associates key with value in the trie. If value has length zero,
+// any existing value is deleted from the trie. The value bytes must not be modified
+// by the caller while they are stored in the trie. If a node was not found in the
+// database, a trie.MissingNodeError is returned.
+//
+// If a trie node is not found in the database, a MissingNodeError is returned.
+func (t *StateTrie) UpdateProof(_ common.Address, key, value []byte) error {
+	hk := t.hashKey(key)
+	v, _ := rlp.EncodeToBytes(value)
+	err := t.trie.Update(hk, v)
+	if err != nil {
+		return err
+	}
+	t.getSecKeyCache()[string(hk)] = common.CopyBytes(key)
+	return nil
+}
+
 // UpdateAccount will abstract the write of an account to the secure trie.
 func (t *StateTrie) UpdateAccount(address common.Address, acc *types.StateAccount, _ int) error {
 	hk := t.hashKey(address.Bytes())
@@ -211,6 +240,15 @@ func (t *StateTrie) MustDelete(key []byte) {
 // If the specified trie node is not in the trie, nothing will be changed.
 // If a node is not found in the database, a MissingNodeError is returned.
 func (t *StateTrie) DeleteStorage(_ common.Address, key []byte) error {
+	hk := t.hashKey(key)
+	delete(t.getSecKeyCache(), string(hk))
+	return t.trie.Delete(hk)
+}
+
+// DeleteProof removes any existing proof from the trie.
+// If the specified trie node is not in the trie, nothing will be changed.
+// If a node is not found in the database, a MissingNodeError is returned.
+func (t *StateTrie) DeleteProof(_ common.Address, key []byte) error {
 	hk := t.hashKey(key)
 	delete(t.getSecKeyCache(), string(hk))
 	return t.trie.Delete(hk)

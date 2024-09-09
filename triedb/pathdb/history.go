@@ -65,8 +65,9 @@ import (
 // current disk layer.
 
 const (
-	accountIndexSize = common.AddressLength + 13 // The length of encoded account index
+	accountIndexSize = common.AddressLength + 17 // The length of encoded account index
 	slotIndexSize    = common.HashLength + 5     // The length of encoded slot index
+	proofIndexSize   = common.HashLength + 5     // The length of encoded proof index
 	historyMetaSize  = 9 + 2*common.HashLength   // The length of encoded history meta
 
 	stateHistoryVersion = uint8(0) // initial version of state history structure.
@@ -146,6 +147,8 @@ type accountIndex struct {
 	offset        uint32         // The offset of item in account data table
 	storageOffset uint32         // The offset of storage index in storage index table
 	storageSlots  uint32         // The number of mutated storage slots belonging to the account
+	proofOffset   uint32         // The offset of proof index in proof index table
+	proofSlots    uint32         // The number of mutated proof slots belonging to the account
 }
 
 // encode packs account index into byte stream.
@@ -156,6 +159,8 @@ func (i *accountIndex) encode() []byte {
 	binary.BigEndian.PutUint32(buf[common.AddressLength+1:], i.offset)
 	binary.BigEndian.PutUint32(buf[common.AddressLength+5:], i.storageOffset)
 	binary.BigEndian.PutUint32(buf[common.AddressLength+9:], i.storageSlots)
+	binary.BigEndian.PutUint32(buf[common.AddressLength+13:], i.proofOffset)
+	binary.BigEndian.PutUint32(buf[common.AddressLength+17:], i.proofSlots)
 	return buf[:]
 }
 
@@ -166,13 +171,15 @@ func (i *accountIndex) decode(blob []byte) {
 	i.offset = binary.BigEndian.Uint32(blob[common.AddressLength+1:])
 	i.storageOffset = binary.BigEndian.Uint32(blob[common.AddressLength+5:])
 	i.storageSlots = binary.BigEndian.Uint32(blob[common.AddressLength+9:])
+	i.proofOffset = binary.BigEndian.Uint32(blob[common.AddressLength+13:])
+	i.proofSlots = binary.BigEndian.Uint32(blob[common.AddressLength+17:])
 }
 
-// slotIndex describes the metadata belonging to a storage slot.
+// slotIndex describes the metadata belonging to a proof/storage slot.
 type slotIndex struct {
 	hash   common.Hash // The hash of slot key
-	length uint8       // The length of storage slot, up to 32 bytes defined in protocol
-	offset uint32      // The offset of item in storage slot data table
+	length uint8       // The length of proof/storage slot, up to 32 bytes defined in protocol
+	offset uint32      // The offset of item in proof/storage slot data table
 }
 
 // encode packs slot index into byte stream.
@@ -240,6 +247,8 @@ type history struct {
 	accountList []common.Address                          // Sorted account hash list
 	storages    map[common.Address]map[common.Hash][]byte // Storage data keyed by its address hash and slot hash
 	storageList map[common.Address][]common.Hash          // Sorted slot hash list
+	proofs      map[common.Address]map[common.Hash][]byte // Proof data keyed by its address hash and slot hash
+	proofList   map[common.Address][]common.Hash          // Sorted proof hash list
 }
 
 // newHistory constructs the state history object with provided state change set.
@@ -271,13 +280,15 @@ func newHistory(root common.Hash, parent common.Hash, block uint64, states *trie
 
 // encode serializes the state history and returns four byte streams represent
 // concatenated account/storage data, account/storage indexes respectively.
-func (h *history) encode() ([]byte, []byte, []byte, []byte) {
+func (h *history) encode() ([]byte, []byte, []byte, []byte, []byte, []byte) {
 	var (
 		slotNumber     uint32 // the number of processed slots
 		accountData    []byte // the buffer for concatenated account data
 		storageData    []byte // the buffer for concatenated storage data
+		proofData      []byte // the buffer for concatenated proof data
 		accountIndexes []byte // the buffer for concatenated account index
 		storageIndexes []byte // the buffer for concatenated storage index
+		proofIndexes   []byte // the buffer for concatenated proof index
 	)
 	for _, addr := range h.accountList {
 		accIndex := accountIndex{
@@ -301,24 +312,31 @@ func (h *history) encode() ([]byte, []byte, []byte, []byte) {
 			accIndex.storageOffset = slotNumber
 			accIndex.storageSlots = uint32(len(slots))
 			slotNumber += uint32(len(slots))
+
+			// Encode proof slots in order
+			// TODO
+			// Fill up the proof meta in account index
 		}
 		accountData = append(accountData, h.accounts[addr]...)
 		accountIndexes = append(accountIndexes, accIndex.encode()...)
 	}
-	return accountData, storageData, accountIndexes, storageIndexes
+	return accountData, storageData, proofData, accountIndexes, storageIndexes, proofIndexes
 }
 
 // decoder wraps the byte streams for decoding with extra meta fields.
 type decoder struct {
-	accountData    []byte // the buffer for concatenated account data
-	storageData    []byte // the buffer for concatenated storage data
-	accountIndexes []byte // the buffer for concatenated account index
-	storageIndexes []byte // the buffer for concatenated storage index
-
-	lastAccount       *common.Address // the address of last resolved account
-	lastAccountRead   uint32          // the read-cursor position of account data
-	lastSlotIndexRead uint32          // the read-cursor position of storage slot index
-	lastSlotDataRead  uint32          // the read-cursor position of storage slot data
+	accountData        []byte          // the buffer for concatenated account data
+	storageData        []byte          // the buffer for concatenated storage data
+	proofData          []byte          // the buffer for concatenated proof data
+	accountIndexes     []byte          // the buffer for concatenated account index
+	storageIndexes     []byte          // the buffer for concatenated storage index
+	proofIndexes       []byte          // the buffer for concatenated proof index
+	lastAccount        *common.Address // the address of last resolved account
+	lastAccountRead    uint32          // the read-cursor position of account data
+	lastSlotIndexRead  uint32          // the read-cursor position of storage slot index
+	lastSlotDataRead   uint32          // the read-cursor position of storage slot data
+	lastProofIndexRead uint32          // the read-cursor position of proof slot index
+	lastProofDataRead  uint32          // the read-cursor position of proof slot data
 }
 
 // verify validates the provided byte streams for decoding state history. A few
@@ -332,12 +350,16 @@ type decoder struct {
 //
 // - empty account data: all accounts were not present
 // - empty storage set: no slots are modified
+// - empty proof set: no slots are modified
 func (r *decoder) verify() error {
 	if len(r.accountIndexes)%accountIndexSize != 0 || len(r.accountIndexes) == 0 {
 		return fmt.Errorf("invalid account index, len: %d", len(r.accountIndexes))
 	}
 	if len(r.storageIndexes)%slotIndexSize != 0 {
 		return fmt.Errorf("invalid storage index, len: %d", len(r.storageIndexes))
+	}
+	if len(r.proofIndexes)%proofIndexSize != 0 {
+		return fmt.Errorf("invalid proof index, len: %d", len(r.proofIndexes))
 	}
 	return nil
 }
@@ -423,20 +445,72 @@ func (r *decoder) readStorage(accIndex accountIndex) ([]common.Hash, map[common.
 	return list, storage, nil
 }
 
+func (r *decoder) readProof(accIndex accountIndex) ([]common.Hash, map[common.Hash][]byte, error) {
+	var (
+		last   common.Hash
+		count  = int(accIndex.proofSlots)
+		list   = make([]common.Hash, 0, count)
+		proofs = make(map[common.Hash][]byte, count)
+	)
+	for j := 0; j < count; j++ {
+		var (
+			index slotIndex
+			start = (accIndex.proofOffset + uint32(j)) * uint32(proofIndexSize)
+			end   = (accIndex.proofOffset + uint32(j+1)) * uint32(proofIndexSize)
+		)
+		// Perform validation before parsing proof slot data, ensure
+		// - slot index is not out-of-slice
+		// - slot data is not out-of-slice
+		// - slot is sorted in order in byte stream
+		// - slot indexes is strictly encoded with no gap inside
+		// - slot data is strictly encoded with no gap inside
+		if start != r.lastProofIndexRead {
+			return nil, nil, errors.New("proof index buffer is gapped")
+		}
+		if uint32(len(r.proofIndexes)) < end {
+			return nil, nil, errors.New("proof index buffer is corrupted")
+		}
+		index.decode(r.proofIndexes[start:end])
+
+		if bytes.Compare(last.Bytes(), index.hash.Bytes()) >= 0 {
+			return nil, nil, errors.New("proof slot is not in order")
+		}
+		if index.offset != r.lastProofDataRead {
+			return nil, nil, errors.New("proof data buffer is gapped")
+		}
+		sEnd := index.offset + uint32(index.length)
+		if uint32(len(r.proofData)) < sEnd {
+			return nil, nil, errors.New("proof data buffer is corrupted")
+		}
+		proofs[index.hash] = r.proofData[r.lastProofDataRead:sEnd]
+		list = append(list, index.hash)
+
+		last = index.hash
+		r.lastProofIndexRead = end
+		r.lastProofDataRead = sEnd
+	}
+	return list, proofs, nil
+
+}
+
 // decode deserializes the account and storage data from the provided byte stream.
-func (h *history) decode(accountData, storageData, accountIndexes, storageIndexes []byte) error {
+func (h *history) decode(accountData, storageData, proofData, accountIndexes, storageIndexes, proofIndexes []byte) error {
 	var (
 		count       = len(accountIndexes) / accountIndexSize
 		accounts    = make(map[common.Address][]byte, count)
 		storages    = make(map[common.Address]map[common.Hash][]byte)
+		proofs      = make(map[common.Address]map[common.Hash][]byte)
 		accountList = make([]common.Address, 0, count)
 		storageList = make(map[common.Address][]common.Hash)
+		proofList   = make(map[common.Address][]common.Hash)
 
 		r = &decoder{
 			accountData:    accountData,
 			storageData:    storageData,
+			proofData:      proofData,
 			accountIndexes: accountIndexes,
 			storageIndexes: storageIndexes,
+			proofIndexes:   proofIndexes,
 		}
 	)
 	if err := r.verify(); err != nil {
@@ -460,11 +534,23 @@ func (h *history) decode(accountData, storageData, accountIndexes, storageIndexe
 			storageList[accIndex.address] = slotList
 			storages[accIndex.address] = slotData
 		}
+
+		// Resolve proof slots
+		slotList, proofData, err := r.readProof(accIndex)
+		if err != nil {
+			return err
+		}
+		if len(slotList) > 0 {
+			proofList[accIndex.address] = slotList
+			proofs[accIndex.address] = proofData
+		}
 	}
 	h.accounts = accounts
 	h.accountList = accountList
 	h.storages = storages
 	h.storageList = storageList
+	h.proofs = proofs
+	h.proofList = proofList
 	return nil
 }
 
@@ -482,10 +568,12 @@ func readHistory(reader ethdb.AncientReader, id uint64) (*history, error) {
 		dec            = history{meta: &m}
 		accountData    = rawdb.ReadStateAccountHistory(reader, id)
 		storageData    = rawdb.ReadStateStorageHistory(reader, id)
+		proofData      = rawdb.ReadStateProofHistory(reader, id)
 		accountIndexes = rawdb.ReadStateAccountIndex(reader, id)
 		storageIndexes = rawdb.ReadStateStorageIndex(reader, id)
+		proofIndexes   = rawdb.ReadStateProofIndex(reader, id)
 	)
-	if err := dec.decode(accountData, storageData, accountIndexes, storageIndexes); err != nil {
+	if err := dec.decode(accountData, storageData, proofData, accountIndexes, storageIndexes, proofIndexes); err != nil {
 		return nil, err
 	}
 	return &dec, nil
@@ -501,12 +589,12 @@ func writeHistory(writer ethdb.AncientWriter, dl *diffLayer) error {
 		start   = time.Now()
 		history = newHistory(dl.rootHash(), dl.parentLayer().rootHash(), dl.block, dl.states)
 	)
-	accountData, storageData, accountIndex, storageIndex := history.encode()
-	dataSize := common.StorageSize(len(accountData) + len(storageData))
-	indexSize := common.StorageSize(len(accountIndex) + len(storageIndex))
+	accountData, storageData, proofData, accountIndex, storageIndex, proofIndex := history.encode()
+	dataSize := common.StorageSize(len(accountData) + len(storageData) + len(proofData))
+	indexSize := common.StorageSize(len(accountIndex) + len(storageIndex) + len(proofIndex))
 
 	// Write history data into five freezer table respectively.
-	rawdb.WriteStateHistory(writer, dl.stateID(), history.meta.encode(), accountIndex, storageIndex, accountData, storageData)
+	rawdb.WriteStateHistory(writer, dl.stateID(), history.meta.encode(), accountIndex, storageIndex, proofIndex, accountData, storageData, proofData)
 
 	historyDataBytesMeter.Mark(int64(dataSize))
 	historyIndexBytesMeter.Mark(int64(indexSize))

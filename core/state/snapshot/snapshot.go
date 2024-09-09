@@ -58,8 +58,15 @@ var (
 	snapshotDirtyStorageReadMeter  = metrics.NewRegisteredMeter("state/snapshot/dirty/storage/read", nil)
 	snapshotDirtyStorageWriteMeter = metrics.NewRegisteredMeter("state/snapshot/dirty/storage/write", nil)
 
+	snapshotDirtyProofHitMeter   = metrics.NewRegisteredMeter("state/snapshot/dirty/proof/hit", nil)
+	snapshotDirtyProofMissMeter  = metrics.NewRegisteredMeter("state/snapshot/dirty/proof/miss", nil)
+	snapshotDirtyProofInexMeter  = metrics.NewRegisteredMeter("state/snapshot/dirty/proof/inex", nil)
+	snapshotDirtyProofReadMeter  = metrics.NewRegisteredMeter("state/snapshot/dirty/proof/read", nil)
+	snapshotDirtyProofWriteMeter = metrics.NewRegisteredMeter("state/snapshot/dirty/proof/write", nil)
+
 	snapshotDirtyAccountHitDepthHist = metrics.NewRegisteredHistogram("state/snapshot/dirty/account/hit/depth", nil, metrics.NewExpDecaySample(1028, 0.015))
 	snapshotDirtyStorageHitDepthHist = metrics.NewRegisteredHistogram("state/snapshot/dirty/storage/hit/depth", nil, metrics.NewExpDecaySample(1028, 0.015))
+	snapshotDirtyProofHitDepthHist   = metrics.NewRegisteredHistogram("state/snapshot/dirty/proof/hit/depth", nil, metrics.NewExpDecaySample(1028, 0.015))
 
 	snapshotFlushAccountItemMeter = metrics.NewRegisteredMeter("state/snapshot/flush/account/item", nil)
 	snapshotFlushAccountSizeMeter = metrics.NewRegisteredMeter("state/snapshot/flush/account/size", nil)
@@ -76,6 +83,10 @@ var (
 	snapshotBloomStorageTrueHitMeter  = metrics.NewRegisteredMeter("state/snapshot/bloom/storage/truehit", nil)
 	snapshotBloomStorageFalseHitMeter = metrics.NewRegisteredMeter("state/snapshot/bloom/storage/falsehit", nil)
 	snapshotBloomStorageMissMeter     = metrics.NewRegisteredMeter("state/snapshot/bloom/storage/miss", nil)
+
+	snapshotBloomProofTrueHitMeter  = metrics.NewRegisteredMeter("state/snapshot/bloom/proof/truehit", nil)
+	snapshotBloomProofFalseHitMeter = metrics.NewRegisteredMeter("state/snapshot/bloom/proof/falsehit", nil)
+	snapshotBloomProofMissMeter     = metrics.NewRegisteredMeter("state/snapshot/bloom/proof/miss", nil)
 
 	// ErrSnapshotStale is returned from data accessors if the underlying snapshot
 	// layer had been invalidated due to the chain progressing forward far enough
@@ -112,6 +123,10 @@ type Snapshot interface {
 	// Storage directly retrieves the storage data associated with a particular hash,
 	// within a particular account.
 	Storage(accountHash, storageHash common.Hash) ([]byte, error)
+
+	// Proof directly retrieves the proof data associated with a particular hash,
+	// within a particular account.
+	Proof(accountHash, proofHash common.Hash) ([]byte, error)
 }
 
 // snapshot is the internal version of the snapshot data layer that supports some
@@ -130,7 +145,7 @@ type snapshot interface {
 	// the specified data items.
 	//
 	// Note, the maps are retained by the method to avoid copying everything.
-	Update(blockRoot common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte) *diffLayer
+	Update(blockRoot common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte, proofs map[common.Hash]map[common.Hash][]byte) *diffLayer
 
 	// Journal commits an entire diff hierarchy to disk into a single journal entry.
 	// This is meant to be used during shutdown to persist the snapshot without
@@ -146,6 +161,9 @@ type snapshot interface {
 
 	// StorageIterator creates a storage iterator over an arbitrary layer.
 	StorageIterator(account common.Hash, seek common.Hash) (StorageIterator, bool)
+
+	// ProofIterator creates a proof iterator over an arbitrary layer.
+	ProofIterator(account common.Hash, seek common.Hash) (ProofIterator, bool)
 }
 
 // Config includes the configurations for snapshots.
@@ -348,7 +366,7 @@ func (t *Tree) Snapshots(root common.Hash, limits int, nodisk bool) []Snapshot {
 
 // Update adds a new snapshot into the tree, if that can be linked to an existing
 // old parent. It is disallowed to insert a disk layer (the origin of all).
-func (t *Tree) Update(blockRoot common.Hash, parentRoot common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte) error {
+func (t *Tree) Update(blockRoot common.Hash, parentRoot common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte, proofs map[common.Hash]map[common.Hash][]byte) error {
 	// Reject noop updates to avoid self-loops in the snapshot tree. This is a
 	// special case that can only happen for Clique networks where empty blocks
 	// don't modify the state (0 block subsidy).
@@ -363,7 +381,7 @@ func (t *Tree) Update(blockRoot common.Hash, parentRoot common.Hash, destructs m
 	if parent == nil {
 		return fmt.Errorf("parent [%#x] snapshot missing", parentRoot)
 	}
-	snap := parent.(snapshot).Update(blockRoot, destructs, accounts, storage)
+	snap := parent.(snapshot).Update(blockRoot, destructs, accounts, storage, proofs)
 
 	// Save the new snapshot for later
 	t.lock.Lock()
@@ -783,6 +801,17 @@ func (t *Tree) StorageIterator(root common.Hash, account common.Hash, seek commo
 		return nil, ErrNotConstructed
 	}
 	return newFastStorageIterator(t, root, account, seek)
+}
+
+func (t *Tree) ProofIterator(root common.Hash, accountHash, storageHash common.Hash) (ProofIterator, error) {
+	ok, err := t.generating()
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return nil, ErrNotConstructed
+	}
+	return newFastProofIterator(t, root, accountHash, storageHash)
 }
 
 // Verify iterates the whole state(all the accounts as well as the corresponding storages)

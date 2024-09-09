@@ -33,6 +33,7 @@ type accountDelete struct {
 	address        common.Address         // address is the unique account identifier
 	origin         []byte                 // origin is the original value of account data in slim-RLP encoding.
 	storagesOrigin map[common.Hash][]byte // storagesOrigin stores the original values of mutated slots in prefix-zero-trimmed RLP format.
+	proofsOrigin   map[common.Hash][]byte // proofsOrigin stores the original values of mutated slots in prefix-zero-trimmed RLP format.
 }
 
 // accountUpdate represents an operation for updating an Ethereum account.
@@ -43,6 +44,8 @@ type accountUpdate struct {
 	code           *contractCode          // code represents mutated contract code; nil means it's not modified.
 	storages       map[common.Hash][]byte // storages stores mutated slots in prefix-zero-trimmed RLP format.
 	storagesOrigin map[common.Hash][]byte // storagesOrigin stores the original values of mutated slots in prefix-zero-trimmed RLP format.
+	proofs         map[common.Hash][]byte // proofs stores the original values of mutated slots in 'prefix-zero-trimmed' RLP format
+	proofsOrigin   map[common.Hash][]byte // proofsOrigin stores the original values of mutated slots in 'prefix-zero-trimmed' RLP format
 }
 
 // stateUpdate represents the difference between two states resulting from state
@@ -56,6 +59,8 @@ type stateUpdate struct {
 	accountsOrigin map[common.Address][]byte                 // accountsOrigin stores the original values of mutated accounts in 'slim RLP' encoding
 	storages       map[common.Hash]map[common.Hash][]byte    // storages stores mutated slots in 'prefix-zero-trimmed' RLP format
 	storagesOrigin map[common.Address]map[common.Hash][]byte // storagesOrigin stores the original values of mutated slots in 'prefix-zero-trimmed' RLP format
+	proofs         map[common.Hash]map[common.Hash][]byte    // proofs stores the original values of mutated slots in 'prefix-zero-trimmed' RLP format
+	proofsOrigin   map[common.Address]map[common.Hash][]byte // proofsOrigin stores the original values of mutated slots in 'prefix-zero-trimmed' RLP format
 	codes          map[common.Address]contractCode           // codes contains the set of dirty codes
 	nodes          *trienode.MergedNodeSet                   // Aggregated dirty nodes caused by state changes
 }
@@ -75,6 +80,8 @@ func newStateUpdate(originRoot common.Hash, root common.Hash, deletes map[common
 		accountsOrigin = make(map[common.Address][]byte)
 		storages       = make(map[common.Hash]map[common.Hash][]byte)
 		storagesOrigin = make(map[common.Address]map[common.Hash][]byte)
+		proofs         = make(map[common.Hash]map[common.Hash][]byte)
+		proofsOrigin   = make(map[common.Address]map[common.Hash][]byte)
 		codes          = make(map[common.Address]contractCode)
 	)
 	// Due to the fact that some accounts could be destructed and resurrected
@@ -85,6 +92,9 @@ func newStateUpdate(originRoot common.Hash, root common.Hash, deletes map[common
 		accountsOrigin[addr] = op.origin
 		if len(op.storagesOrigin) > 0 {
 			storagesOrigin[addr] = op.storagesOrigin
+		}
+		if len(op.proofsOrigin) > 0 {
+			proofsOrigin[addr] = op.proofsOrigin
 		}
 	}
 	// Aggregate account updates then.
@@ -118,6 +128,22 @@ func newStateUpdate(originRoot common.Hash, root common.Hash, deletes map[common
 			}
 			storagesOrigin[addr] = origin
 		}
+		if len(op.proofs) > 0 {
+			proofs[addrHash] = op.proofs
+		}
+		if len(op.proofsOrigin) > 0 {
+			origin := proofsOrigin[addr]
+			if origin == nil {
+				proofsOrigin[addr] = op.proofsOrigin
+				continue
+			}
+			for key, slot := range op.proofsOrigin {
+				if _, found := origin[key]; !found {
+					origin[key] = slot
+				}
+			}
+			proofsOrigin[addr] = origin
+		}
 	}
 	return &stateUpdate{
 		originRoot:     types.TrieRootHash(originRoot),
@@ -127,6 +153,8 @@ func newStateUpdate(originRoot common.Hash, root common.Hash, deletes map[common
 		accountsOrigin: accountsOrigin,
 		storages:       storages,
 		storagesOrigin: storagesOrigin,
+		proofs:         proofs,
+		proofsOrigin:   proofsOrigin,
 		codes:          codes,
 		nodes:          nodes,
 	}

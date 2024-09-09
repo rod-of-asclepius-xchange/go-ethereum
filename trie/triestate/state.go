@@ -24,14 +24,16 @@ import "github.com/ethereum/go-ethereum/common"
 type Set struct {
 	Accounts map[common.Address][]byte                 // Mutated account set, nil means the account was not present
 	Storages map[common.Address]map[common.Hash][]byte // Mutated storage set, nil means the slot was not present
+	Proofs   map[common.Address]map[common.Hash][]byte // Mutated proofs set, nil means the proof was not present
 	size     common.StorageSize                        // Approximate size of set
 }
 
 // New constructs the state set with provided data.
-func New(accounts map[common.Address][]byte, storages map[common.Address]map[common.Hash][]byte) *Set {
+func New(accounts map[common.Address][]byte, storages map[common.Address]map[common.Hash][]byte, proofs map[common.Address]map[common.Hash][]byte) *Set {
 	return &Set{
 		Accounts: accounts,
 		Storages: storages,
+		Proofs:   proofs,
 	}
 }
 
@@ -46,6 +48,12 @@ func (s *Set) Size() common.StorageSize {
 	for _, slots := range s.Storages {
 		for _, val := range slots {
 			s.size += common.StorageSize(common.HashLength + len(val))
+		}
+		s.size += common.StorageSize(common.AddressLength)
+	}
+	for _, proofs := range s.Proofs {
+		for _, proof := range proofs {
+			s.size += common.StorageSize(common.HashLength + len(proof))
 		}
 		s.size += common.StorageSize(common.AddressLength)
 	}
