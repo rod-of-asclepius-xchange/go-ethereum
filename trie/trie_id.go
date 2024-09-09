@@ -23,6 +23,7 @@ type ID struct {
 	StateRoot common.Hash // The root of the corresponding state(block.root)
 	Owner     common.Hash // The contract address hash which the trie belongs to
 	Root      common.Hash // The root hash of trie
+	IsProof   bool        // Whether the trie is a proof trie
 }
 
 // StateTrieID constructs an identifier for state trie with the provided state root.
@@ -31,6 +32,7 @@ func StateTrieID(root common.Hash) *ID {
 		StateRoot: root,
 		Owner:     common.Hash{},
 		Root:      root,
+		IsProof:   false,
 	}
 }
 
@@ -41,6 +43,17 @@ func StorageTrieID(stateRoot common.Hash, owner common.Hash, root common.Hash) *
 		StateRoot: stateRoot,
 		Owner:     owner,
 		Root:      root,
+		IsProof:   false,
+	}
+}
+
+// ProofTrieID constructs an identifier for a proof trie with provided root.
+func ProofTrieID(stateRoot common.Hash, owner common.Hash, root common.Hash) *ID {
+	return &ID{
+		StateRoot: root,
+		Owner:     owner,
+		Root:      root,
+		IsProof:   true,
 	}
 }
 

@@ -75,6 +75,13 @@ type journalStorage struct {
 	Slots   [][]byte
 }
 
+// journalProof represents a proof of a storage slot.
+type journalProof struct {
+	Account common.Address
+	Hashes  []common.Hash
+	Slots   [][]byte
+}
+
 // loadJournal tries to parse the layer journal from the disk.
 func (db *Database) loadJournal(diskRoot common.Hash) (layer, error) {
 	journal := rawdb.ReadTrieJournal(db.diskdb)
@@ -217,8 +224,10 @@ func (db *Database) loadDiffLayer(parent layer, r *rlp.Stream) (layer, error) {
 	var (
 		jaccounts journalAccounts
 		jstorages []journalStorage
+		jproofs   []journalProof
 		accounts  = make(map[common.Address][]byte)
 		storages  = make(map[common.Address]map[common.Hash][]byte)
+		proofs    = make(map[common.Address]map[common.Hash][]byte)
 	)
 	if err := r.Decode(&jaccounts); err != nil {
 		return nil, fmt.Errorf("load diff accounts: %v", err)
@@ -240,7 +249,21 @@ func (db *Database) loadDiffLayer(parent layer, r *rlp.Stream) (layer, error) {
 		}
 		storages[entry.Account] = set
 	}
-	return db.loadDiffLayer(newDiffLayer(parent, root, parent.stateID()+1, block, nodes, triestate.New(accounts, storages)), r)
+	if err := r.Decode(&jproofs); err != nil {
+		return nil, fmt.Errorf("load diff proofs: %v", err)
+	}
+	for _, entry := range jproofs {
+		set := make(map[common.Hash][]byte)
+		for i, h := range entry.Hashes {
+			if len(entry.Slots[i]) > 0 {
+				set[h] = entry.Slots[i]
+			} else {
+				set[h] = nil
+			}
+		}
+		proofs[entry.Account] = set
+	}
+	return db.loadDiffLayer(newDiffLayer(parent, root, parent.stateID()+1, block, nodes, triestate.New(accounts, storages, proofs)), r)
 }
 
 // journal implements the layer interface, marshaling the un-flushed trie nodes
@@ -325,6 +348,18 @@ func (dl *diffLayer) journal(w io.Writer) error {
 		storage = append(storage, entry)
 	}
 	if err := rlp.Encode(w, storage); err != nil {
+		return err
+	}
+	proofs := make([]journalProof, 0, len(dl.states.Proofs))
+	for addr, slots := range dl.states.Proofs {
+		entry := journalProof{Account: addr}
+		for slotHash, slot := range slots {
+			entry.Hashes = append(entry.Hashes, slotHash)
+			entry.Slots = append(entry.Slots, slot)
+		}
+		proofs = append(proofs, entry)
+	}
+	if err := rlp.Encode(w, proofs); err != nil {
 		return err
 	}
 	log.Debug("Journaled pathdb diff layer", "root", dl.root, "parent", dl.parent.rootHash(), "id", dl.stateID(), "block", dl.block, "nodes", len(dl.nodes))

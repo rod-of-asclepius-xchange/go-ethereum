@@ -36,6 +36,7 @@ func randomStateSet(n int) *triestate.Set {
 	var (
 		accounts = make(map[common.Address][]byte)
 		storages = make(map[common.Address]map[common.Hash][]byte)
+		proofs   = make(map[common.Address]map[common.Hash][]byte)
 	)
 	for i := 0; i < n; i++ {
 		addr := testrand.Address()
@@ -44,10 +45,15 @@ func randomStateSet(n int) *triestate.Set {
 			v, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(testrand.Bytes(32)))
 			storages[addr][testrand.Hash()] = v
 		}
+		proofs[addr] = make(map[common.Hash][]byte)
+		for j := 0; j < 3; j++ {
+			v, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(testrand.Bytes(32)))
+			proofs[addr][testrand.Hash()] = v
+		}
 		account := generateAccount(types.EmptyRootHash)
 		accounts[addr] = types.SlimAccountRLP(account)
 	}
-	return triestate.New(accounts, storages)
+	return triestate.New(accounts, storages, proofs)
 }
 
 func makeHistory() *history {
@@ -84,8 +90,8 @@ func TestEncodeDecodeHistory(t *testing.T) {
 	}
 
 	// check if account/storage data can be correctly encode/decode
-	accountData, storageData, accountIndexes, storageIndexes := obj.encode()
-	if err := dec.decode(accountData, storageData, accountIndexes, storageIndexes); err != nil {
+	accountData, storageData, proofData, accountIndexes, storageIndexes, proofIndexes := obj.encode()
+	if err := dec.decode(accountData, storageData, proofData, accountIndexes, storageIndexes, proofIndexes); err != nil {
 		t.Fatalf("Failed to decode, err: %v", err)
 	}
 	if !compareSet(dec.accounts, obj.accounts) {
@@ -134,8 +140,8 @@ func TestTruncateHeadHistory(t *testing.T) {
 	defer freezer.Close()
 
 	for i := 0; i < len(hs); i++ {
-		accountData, storageData, accountIndex, storageIndex := hs[i].encode()
-		rawdb.WriteStateHistory(freezer, uint64(i+1), hs[i].meta.encode(), accountIndex, storageIndex, accountData, storageData)
+		accountData, storageData, proofData, accountIndex, storageIndex, proofIndex := hs[i].encode()
+		rawdb.WriteStateHistory(freezer, uint64(i+1), hs[i].meta.encode(), accountIndex, storageIndex, proofIndex, accountData, storageData, proofData)
 		rawdb.WriteStateID(db, hs[i].meta.root, uint64(i+1))
 		roots = append(roots, hs[i].meta.root)
 	}
@@ -162,8 +168,8 @@ func TestTruncateTailHistory(t *testing.T) {
 	defer freezer.Close()
 
 	for i := 0; i < len(hs); i++ {
-		accountData, storageData, accountIndex, storageIndex := hs[i].encode()
-		rawdb.WriteStateHistory(freezer, uint64(i+1), hs[i].meta.encode(), accountIndex, storageIndex, accountData, storageData)
+		accountData, storageData, proofData, accountIndex, storageIndex, proofIndex := hs[i].encode()
+		rawdb.WriteStateHistory(freezer, uint64(i+1), hs[i].meta.encode(), accountIndex, storageIndex, proofIndex, accountData, storageData, proofData)
 		rawdb.WriteStateID(db, hs[i].meta.root, uint64(i+1))
 		roots = append(roots, hs[i].meta.root)
 	}
@@ -205,8 +211,8 @@ func TestTruncateTailHistories(t *testing.T) {
 		defer freezer.Close()
 
 		for i := 0; i < len(hs); i++ {
-			accountData, storageData, accountIndex, storageIndex := hs[i].encode()
-			rawdb.WriteStateHistory(freezer, uint64(i+1), hs[i].meta.encode(), accountIndex, storageIndex, accountData, storageData)
+			accountData, storageData, proofData, accountIndex, storageIndex, proofIndex := hs[i].encode()
+			rawdb.WriteStateHistory(freezer, uint64(i+1), hs[i].meta.encode(), accountIndex, storageIndex, proofIndex, accountData, storageData, proofData)
 			rawdb.WriteStateID(db, hs[i].meta.root, uint64(i+1))
 			roots = append(roots, hs[i].meta.root)
 		}
@@ -233,8 +239,8 @@ func TestTruncateOutOfRange(t *testing.T) {
 	defer freezer.Close()
 
 	for i := 0; i < len(hs); i++ {
-		accountData, storageData, accountIndex, storageIndex := hs[i].encode()
-		rawdb.WriteStateHistory(freezer, uint64(i+1), hs[i].meta.encode(), accountIndex, storageIndex, accountData, storageData)
+		accountData, storageData, proofData, accountIndex, storageIndex, proofIndex := hs[i].encode()
+		rawdb.WriteStateHistory(freezer, uint64(i+1), hs[i].meta.encode(), accountIndex, storageIndex, proofIndex, accountData, storageData, proofData)
 		rawdb.WriteStateID(db, hs[i].meta.root, uint64(i+1))
 	}
 	truncateFromTail(db, freezer, uint64(len(hs)/2))

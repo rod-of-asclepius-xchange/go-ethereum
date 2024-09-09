@@ -35,6 +35,7 @@ type nodeIterator struct {
 
 	stateIt trie.NodeIterator // Primary iterator for the global state trie
 	dataIt  trie.NodeIterator // Secondary iterator for the data trie of a contract
+	proofIt trie.NodeIterator // Secondary iterator for the proof trie of a contract
 
 	accountHash common.Hash // Hash of the node containing the account
 	codeHash    common.Hash // Hash of the contract source code
@@ -93,6 +94,16 @@ func (it *nodeIterator) step() error {
 		}
 		return nil
 	}
+	// If we had proof nodes previously, we surely have at least state nodes
+	if it.proofIt != nil {
+		if cont := it.proofIt.Next(true); !cont {
+			if it.proofIt.Error() != nil {
+				return it.proofIt.Error()
+			}
+			it.proofIt = nil
+		}
+		return nil
+	}
 	// If we had source code previously, discard that
 	if it.code != nil {
 		it.code = nil
@@ -134,6 +145,19 @@ func (it *nodeIterator) step() error {
 	if !it.dataIt.Next(true) {
 		it.dataIt = nil
 	}
+	// Traverse the proof slots belong to the account
+	proofTrie, err := it.state.db.OpenProofTrie(it.state.originalRoot, address, account.Root)
+	if err != nil {
+		return err
+	}
+	it.proofIt, err = proofTrie.NodeIterator(nil)
+	if err != nil {
+		return err
+	}
+	if !it.proofIt.Next(true) {
+		it.proofIt = nil
+	}
+
 	if !bytes.Equal(account.CodeHash, types.EmptyCodeHash.Bytes()) {
 		it.codeHash = common.BytesToHash(account.CodeHash)
 		it.code, err = it.state.db.ContractCode(address, common.BytesToHash(account.CodeHash))
@@ -159,6 +183,11 @@ func (it *nodeIterator) retrieve() bool {
 	switch {
 	case it.dataIt != nil:
 		it.Hash, it.Parent = it.dataIt.Hash(), it.dataIt.Parent()
+		if it.Parent == (common.Hash{}) {
+			it.Parent = it.accountHash
+		}
+	case it.proofIt != nil:
+		it.Hash, it.Parent = it.proofIt.Hash(), it.proofIt.Parent()
 		if it.Parent == (common.Hash{}) {
 			it.Parent = it.accountHash
 		}

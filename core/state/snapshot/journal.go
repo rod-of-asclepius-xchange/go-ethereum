@@ -66,6 +66,13 @@ type journalStorage struct {
 	Vals [][]byte
 }
 
+// journalProof is a proof entry in a diffLayer's disk journal.
+type journalProof struct {
+	Hash common.Hash
+	Keys []common.Hash
+	Vals [][]byte
+}
+
 func ParseGeneratorStatus(generatorBlob []byte) string {
 	if len(generatorBlob) == 0 {
 		return ""
@@ -109,8 +116,8 @@ func loadAndParseJournal(db ethdb.KeyValueStore, base *diskLayer) (snapshot, jou
 	// is not matched with disk layer; or the it's the legacy-format journal,
 	// etc.), we just discard all diffs and try to recover them later.
 	var current snapshot = base
-	err := iterateJournal(db, func(parent common.Hash, root common.Hash, destructSet map[common.Hash]struct{}, accountData map[common.Hash][]byte, storageData map[common.Hash]map[common.Hash][]byte) error {
-		current = newDiffLayer(current, root, destructSet, accountData, storageData)
+	err := iterateJournal(db, func(parent common.Hash, root common.Hash, destructSet map[common.Hash]struct{}, accountData map[common.Hash][]byte, storageData map[common.Hash]map[common.Hash][]byte, proofsData map[common.Hash]map[common.Hash][]byte) error {
+		current = newDiffLayer(current, root, destructSet, accountData, storageData, proofsData)
 		return nil
 	})
 	if err != nil {
@@ -271,7 +278,7 @@ func (dl *diffLayer) Journal(buffer *bytes.Buffer) (common.Hash, error) {
 
 // journalCallback is a function which is invoked by iterateJournal, every
 // time a difflayer is loaded from disk.
-type journalCallback = func(parent common.Hash, root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte) error
+type journalCallback = func(parent common.Hash, root common.Hash, destructs map[common.Hash]struct{}, accounts map[common.Hash][]byte, storage map[common.Hash]map[common.Hash][]byte, proofs map[common.Hash]map[common.Hash][]byte) error
 
 // iterateJournal iterates through the journalled difflayers, loading them from
 // the database, and invoking the callback for each loaded layer.
@@ -313,9 +320,11 @@ func iterateJournal(db ethdb.KeyValueReader, callback journalCallback) error {
 			destructs   []journalDestruct
 			accounts    []journalAccount
 			storage     []journalStorage
+			proofs      []journalProof
 			destructSet = make(map[common.Hash]struct{})
 			accountData = make(map[common.Hash][]byte)
 			storageData = make(map[common.Hash]map[common.Hash][]byte)
+			proofsData  = make(map[common.Hash]map[common.Hash][]byte)
 		)
 		// Read the next diff journal entry
 		if err := r.Decode(&root); err != nil {
@@ -333,6 +342,9 @@ func iterateJournal(db ethdb.KeyValueReader, callback journalCallback) error {
 		}
 		if err := r.Decode(&storage); err != nil {
 			return fmt.Errorf("load diff storage: %v", err)
+		}
+		if err := r.Decode(&proofs); err != nil {
+			return fmt.Errorf("load diff proofs: %v", err)
 		}
 		for _, entry := range destructs {
 			destructSet[entry.Hash] = struct{}{}
@@ -355,7 +367,18 @@ func iterateJournal(db ethdb.KeyValueReader, callback journalCallback) error {
 			}
 			storageData[entry.Hash] = slots
 		}
-		if err := callback(parent, root, destructSet, accountData, storageData); err != nil {
+		for _, entry := range proofs {
+			slots := make(map[common.Hash][]byte)
+			for i, key := range entry.Keys {
+				if len(entry.Vals[i]) > 0 { // RLP loses nil-ness, but `[]byte{}` is not a valid item, so reinterpret that
+					slots[key] = entry.Vals[i]
+				} else {
+					slots[key] = nil
+				}
+			}
+			proofsData[entry.Hash] = slots
+		}
+		if err := callback(parent, root, destructSet, accountData, storageData, proofsData); err != nil {
 			return err
 		}
 		parent = root

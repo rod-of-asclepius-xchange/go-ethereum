@@ -58,16 +58,20 @@ const (
 	stateHistoryMeta         = "history.meta"
 	stateHistoryAccountIndex = "account.index"
 	stateHistoryStorageIndex = "storage.index"
+	stateHistoryProofIndex   = "proof.index"
 	stateHistoryAccountData  = "account.data"
 	stateHistoryStorageData  = "storage.data"
+	stateHistoryProofData    = "proof.data"
 )
 
 var stateFreezerNoSnappy = map[string]bool{
 	stateHistoryMeta:         true,
 	stateHistoryAccountIndex: false,
 	stateHistoryStorageIndex: false,
+	stateHistoryProofIndex:   false,
 	stateHistoryAccountData:  false,
 	stateHistoryStorageData:  false,
+	stateHistoryProofData:    false,
 }
 
 // The list of identifiers of ancient stores.

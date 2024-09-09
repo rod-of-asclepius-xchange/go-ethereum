@@ -121,6 +121,12 @@ func (t *VerkleTrie) GetStorage(addr common.Address, key []byte) ([]byte, error)
 	return common.TrimLeftZeroes(val), nil
 }
 
+// GetProof implements state.Trie, returning the proof for the specified key.
+// If the tree is corrupted, an error will be returned.
+func (t *VerkleTrie) GetProof(addr common.Address, key []byte) ([]byte, error) {
+	return nil, errors.New("not implemented")
+}
+
 // UpdateAccount implements state.Trie, writing the provided account into the tree.
 // If the tree is corrupted, an error will be returned.
 func (t *VerkleTrie) UpdateAccount(addr common.Address, acc *types.StateAccount, codeLen int) error {
@@ -168,6 +174,12 @@ func (t *VerkleTrie) UpdateStorage(address common.Address, key, value []byte) er
 	}
 	k := utils.StorageSlotKeyWithEvaluatedAddress(t.cache.Get(address.Bytes()), key)
 	return t.root.Insert(k, v[:], t.nodeResolver)
+}
+
+// UpdateProof implements state.Trie, writing the provided proof into the trie.
+// If the tree is corrupted, an error will be returned.
+func (t *VerkleTrie) UpdateProof(addr common.Address, key, value []byte) error {
+	return errors.New("not implemented")
 }
 
 // DeleteAccount implements state.Trie, deleting the specified account from the
@@ -238,6 +250,13 @@ func (t *VerkleTrie) DeleteStorage(addr common.Address, key []byte) error {
 	var zero [32]byte
 	k := utils.StorageSlotKeyWithEvaluatedAddress(t.cache.Get(addr.Bytes()), key)
 	return t.root.Insert(k, zero[:], t.nodeResolver)
+}
+
+// DeleteProof implements state.Trie, deleting the specified proof from the
+// trie. If the proof was not existent in the trie, no error will be returned.
+// If the trie is corrupted, an error will be returned.
+func (t *VerkleTrie) DeleteProof(addr common.Address, key []byte) error {
+	return errors.New("not implemented")
 }
 
 // Hash returns the root hash of the tree. It does not write to the database and

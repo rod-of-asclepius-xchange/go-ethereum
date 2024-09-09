@@ -103,6 +103,10 @@ func isTrieNode(scheme string, key, val []byte) (bool, common.Hash) {
 		if ok {
 			return true, crypto.Keccak256Hash(val)
 		}
+		ok = rawdb.IsProofTrieNode(key)
+		if ok {
+			return true, crypto.Keccak256Hash(val)
+		}
 	}
 	return false, common.Hash{}
 }

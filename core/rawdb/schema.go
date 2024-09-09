@@ -109,12 +109,14 @@ var (
 	bloomBitsPrefix       = []byte("B") // bloomBitsPrefix + bit (uint16 big endian) + section (uint64 big endian) + hash -> bloom bits
 	SnapshotAccountPrefix = []byte("a") // SnapshotAccountPrefix + account hash -> account trie value
 	SnapshotStoragePrefix = []byte("o") // SnapshotStoragePrefix + account hash + storage hash -> storage trie value
+	SnapshotProofPrefix   = []byte("p") // SnapshotProofPrefix + account hash + proof hash -> proof trie value
 	CodePrefix            = []byte("c") // CodePrefix + code hash -> account code
 	skeletonHeaderPrefix  = []byte("S") // skeletonHeaderPrefix + num (uint64 big endian) -> header
 
 	// Path-based storage scheme of merkle patricia trie.
 	TrieNodeAccountPrefix = []byte("A") // TrieNodeAccountPrefix + hexPath -> trie node
 	TrieNodeStoragePrefix = []byte("O") // TrieNodeStoragePrefix + accountHash + hexPath -> trie node
+	TrieNodeProofPrefix   = []byte("P") // TrieNodeProofPrefix + accountHash + hexPath -> trie node
 	stateIDPrefix         = []byte("L") // stateIDPrefix + state root -> state id
 
 	// VerklePrefix is the database prefix for Verkle trie data, which includes:
@@ -286,6 +288,15 @@ func storageTrieNodeKey(accountHash common.Hash, path []byte) []byte {
 	return buf
 }
 
+// proofTrieNodeKey = TrieNodeProofPrefix + accountHash + nodePath.
+func proofTrieNodeKey(accountHash common.Hash, path []byte) []byte {
+	buf := make([]byte, len(TrieNodeProofPrefix)+common.HashLength+len(path))
+	n := copy(buf, TrieNodeProofPrefix)
+	n += copy(buf[n:], accountHash.Bytes())
+	copy(buf[n:], path)
+	return buf
+}
+
 // IsLegacyTrieNode reports whether a provided database entry is a legacy trie
 // node. The characteristics of legacy trie node are:
 // - the key length is 32 bytes
@@ -344,5 +355,32 @@ func ResolveStorageTrieNode(key []byte) (bool, common.Hash, []byte) {
 // trie node in path-based state scheme.
 func IsStorageTrieNode(key []byte) bool {
 	ok, _, _ := ResolveStorageTrieNode(key)
+	return ok
+}
+
+// ResolveProofTrieNode reports whether a provided database entry is a proof
+// trie node in path-based state scheme, and returns the resolved account hash
+// and node path if so.
+func ResolveProofTrieNode(key []byte) (bool, common.Hash, []byte) {
+	if !bytes.HasPrefix(key, TrieNodeProofPrefix) {
+		return false, common.Hash{}, nil
+	}
+	// The remaining key consists of 2 parts:
+	// - 32 bytes account hash
+	// - hex node path whose length is in the range 0 to 64
+	if len(key) < len(TrieNodeProofPrefix)+common.HashLength {
+		return false, common.Hash{}, nil
+	}
+	if len(key) >= len(TrieNodeProofPrefix)+common.HashLength+common.HashLength*2 {
+		return false, common.Hash{}, nil
+	}
+	accountHash := common.BytesToHash(key[len(TrieNodeProofPrefix) : len(TrieNodeProofPrefix)+common.HashLength])
+	return true, accountHash, key[len(TrieNodeProofPrefix)+common.HashLength:]
+}
+
+// IsProofTrieNode reports whether a provided database entry is a proof
+// trie node in path-based state scheme.
+func IsProofTrieNode(key []byte) bool {
+	ok, _, _ := ResolveProofTrieNode(key)
 	return ok
 }

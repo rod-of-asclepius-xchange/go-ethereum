@@ -207,6 +207,7 @@ func (b *nodebuffer) allocBatch(db ethdb.KeyValueStore) ethdb.Batch {
 			metasize += len(nodes) * len(rawdb.TrieNodeAccountPrefix) // database key prefix
 		} else {
 			metasize += len(nodes) * (len(rawdb.TrieNodeStoragePrefix) + common.HashLength) // database key prefix + owner
+			metasize += len(nodes) * (len(rawdb.TrieNodeProofPrefix) + common.HashLength)   // database key prefix + owner
 		}
 	}
 	return db.NewBatchWithSize((metasize + int(b.size)) * 11 / 10) // extra 10% for potential pebble internal stuff
@@ -254,6 +255,7 @@ func writeNodes(batch ethdb.Batch, nodes map[common.Hash]map[string]*trienode.No
 					rawdb.DeleteAccountTrieNode(batch, []byte(path))
 				} else {
 					rawdb.DeleteStorageTrieNode(batch, owner, []byte(path))
+					rawdb.DeleteStorageTrieProof(batch, owner, []byte(path))
 				}
 				if clean != nil {
 					clean.Del(cacheKey(owner, []byte(path)))
@@ -263,6 +265,7 @@ func writeNodes(batch ethdb.Batch, nodes map[common.Hash]map[string]*trienode.No
 					rawdb.WriteAccountTrieNode(batch, []byte(path), n.Blob)
 				} else {
 					rawdb.WriteStorageTrieNode(batch, owner, []byte(path), n.Blob)
+					rawdb.WriteStorageTrieProof(batch, owner, []byte(path), n.Blob)
 				}
 				if clean != nil {
 					clean.Set(cacheKey(owner, []byte(path)), n.Blob)

@@ -62,6 +62,7 @@ type fastIterator struct {
 
 	curAccount []byte
 	curSlot    []byte
+	curProof   []byte
 
 	iterators []*weightedIterator
 	initiated bool
@@ -341,4 +342,11 @@ func newFastAccountIterator(tree *Tree, root common.Hash, seek common.Hash) (Acc
 // the entire snapshot diff stack simultaneously.
 func newFastStorageIterator(tree *Tree, root common.Hash, account common.Hash, seek common.Hash) (StorageIterator, error) {
 	return newFastIterator(tree, root, account, seek, false)
+}
+
+// newFastProofIterator creates a new hierarchical proof iterator with one
+// element per diff layer. The returned combo iterator can be used to walk over
+// the entire snapshot diff stack simultaneously.
+func newFastProofIterator(tree *Tree, root common.Hash, accountHash, storageHash common.Hash) (ProofIterator, error) {
+	return newFastIterator(tree, root, accountHash, storageHash, false)
 }

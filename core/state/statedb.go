@@ -151,8 +151,12 @@ type StateDB struct {
 	StorageReads         time.Duration
 	StorageUpdates       time.Duration
 	StorageCommits       time.Duration
+	ProofReads           time.Duration
+	ProofUpdates         time.Duration
+	ProofCommits         time.Duration
 	SnapshotAccountReads time.Duration
 	SnapshotStorageReads time.Duration
+	SnapshotProofReads   time.Duration
 	SnapshotCommits      time.Duration
 	TrieDBCommits        time.Duration
 
@@ -162,6 +166,9 @@ type StateDB struct {
 	StorageLoaded  int          // Number of storage slots retrieved from the database during the state transition
 	StorageUpdated atomic.Int64 // Number of storage slots updated during the state transition
 	StorageDeleted atomic.Int64 // Number of storage slots deleted during the state transition
+	ProofLoaded    int          // Number of proofs retrieved from the database during the state transition
+	ProofUpdated   atomic.Int64 // Number of proofs updated during the state transition
+	ProofDeleted   atomic.Int64 // Number of proofs deleted during the state transition
 }
 
 // New creates a new state from a given trie.
@@ -1314,7 +1321,7 @@ func (s *StateDB) commitAndFlush(block uint64, deleteEmptyObjects bool) (*stateU
 			s.snap = nil
 
 			start := time.Now()
-			if err := s.snaps.Update(ret.root, ret.originRoot, ret.destructs, ret.accounts, ret.storages); err != nil {
+			if err := s.snaps.Update(ret.root, ret.originRoot, ret.destructs, ret.accounts, ret.storages, ret.proofs); err != nil {
 				log.Warn("Failed to update snapshot tree", "from", ret.originRoot, "to", ret.root, "err", err)
 			}
 			// Keep 128 diff layers in the memory, persistent layer is 129th.
@@ -1329,7 +1336,7 @@ func (s *StateDB) commitAndFlush(block uint64, deleteEmptyObjects bool) (*stateU
 		// If trie database is enabled, commit the state update as a new layer
 		if db := s.db.TrieDB(); db != nil {
 			start := time.Now()
-			set := triestate.New(ret.accountsOrigin, ret.storagesOrigin)
+			set := triestate.New(ret.accountsOrigin, ret.storagesOrigin, ret.proofsOrigin)
 			if err := db.Update(ret.root, ret.originRoot, block, ret.nodes, set); err != nil {
 				return nil, err
 			}

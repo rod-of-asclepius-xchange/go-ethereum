@@ -124,6 +124,37 @@ func DeleteStorageTrieNode(db ethdb.KeyValueWriter, accountHash common.Hash, pat
 	}
 }
 
+// ReadStorageTrieProof retrieves the storage trie proof with the given
+// account hash and path.
+func ReadStorageTrieProof(db ethdb.KeyValueReader, accountHash common.Hash, path []byte) []byte {
+	data, _ := db.Get(proofTrieNodeKey(accountHash, path))
+	return data
+}
+
+// WriteStorageTrieProof writes the provided storage trie proof into database.
+func WriteStorageTrieProof(db ethdb.KeyValueWriter, accountHash common.Hash, path []byte, proof []byte) {
+	if err := db.Put(proofTrieNodeKey(accountHash, path), proof); err != nil {
+		log.Crit("Failed to store proof trie node", "err", err)
+	}
+}
+
+// DeleteStorageTrieProof deletes the specified storage trie proof from the database.
+func DeleteStorageTrieProof(db ethdb.KeyValueWriter, accountHash common.Hash, path []byte) {
+	if err := db.Delete(proofTrieNodeKey(accountHash, path)); err != nil {
+		log.Crit("Failed to delete proof trie node", "err", err)
+	}
+}
+
+// HasProofTrieNode checks the presence of the proof trie node with the
+// specified account hash and path, regardless of the node hash.
+func HasProofTrieNode(db ethdb.KeyValueReader, accountHash common.Hash, path []byte) bool {
+	has, err := db.Has(proofTrieNodeKey(accountHash, path))
+	if err != nil {
+		return false
+	}
+	return has
+}
+
 // ReadLegacyTrieNode retrieves the legacy trie node with the given
 // associated node hash.
 func ReadLegacyTrieNode(db ethdb.KeyValueReader, hash common.Hash) []byte {

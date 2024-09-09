@@ -59,6 +59,10 @@ type stateObject struct {
 	dirtyStorage   Storage // Storage entries that have been modified within the current transaction
 	pendingStorage Storage // Storage entries that have been modified within the current block
 
+	originProofStorage  Storage // Proof entries that have been accessed within the current block
+	dirtyProofStorage   Storage // Proof entries that have been modified within the current transaction
+	pendingProofStorage Storage // Proof entries that have been modified within the current block
+
 	// uncommittedStorage tracks a set of storage entries that have been modified
 	// but not yet committed since the "last commit operation", along with their
 	// original values before mutation.
@@ -69,6 +73,17 @@ type stateObject struct {
 	// at the end of block, this set essentially tracks all the modifications
 	// made within the block.
 	uncommittedStorage Storage
+
+	// uncommitedProofs tracks a set of proof entries that have been modified
+	// but not yet committed since the "last commit operation", along with their
+	// original values before mutation.
+	//
+	// Specifically, the commit will be performed after each transaction before
+	// the byzantium fork, therefore the map is already reset at the transaction
+	// boundary; however post the byzantium fork, the commit will only be performed
+	// at the end of block, this set essentially tracks all the modifications
+	// made within the block.
+	uncommittedProofs Storage
 
 	// Cache flags.
 	dirtyCode bool // true if the code was updated
@@ -97,15 +112,19 @@ func newObject(db *StateDB, address common.Address, acct *types.StateAccount) *s
 		acct = types.NewEmptyStateAccount()
 	}
 	return &stateObject{
-		db:                 db,
-		address:            address,
-		addrHash:           crypto.Keccak256Hash(address[:]),
-		origin:             origin,
-		data:               *acct,
-		originStorage:      make(Storage),
-		dirtyStorage:       make(Storage),
-		pendingStorage:     make(Storage),
-		uncommittedStorage: make(Storage),
+		db:                  db,
+		address:             address,
+		addrHash:            crypto.Keccak256Hash(address[:]),
+		origin:              origin,
+		data:                *acct,
+		originStorage:       make(Storage),
+		dirtyStorage:        make(Storage),
+		pendingStorage:      make(Storage),
+		uncommittedStorage:  make(Storage),
+		originProofStorage:  make(Storage),
+		dirtyProofStorage:   make(Storage),
+		pendingProofStorage: make(Storage),
+		uncommittedProofs:   make(Storage),
 	}
 }
 
@@ -127,6 +146,13 @@ func (s *stateObject) getTrie() (Trie, error) {
 		tr, err := s.db.db.OpenStorageTrie(s.db.originalRoot, s.address, s.data.Root, s.db.trie)
 		if err != nil {
 			return nil, err
+		}
+		if tr == nil {
+			tr, err = s.db.db.OpenProofTrie(s.db.originalRoot, s.address, s.data.Root)
+			if err != nil {
+				return nil, err
+			}
+			s.trie = tr
 		}
 		s.trie = tr
 	}
@@ -174,7 +200,13 @@ func (s *stateObject) GetCommittedState(key common.Hash) common.Hash {
 	if value, pending := s.pendingStorage[key]; pending {
 		return value
 	}
+	if value, pending := s.pendingProofStorage[key]; pending {
+		return value
+	}
 	if value, cached := s.originStorage[key]; cached {
+		return value
+	}
+	if value, cached := s.originProofStorage[key]; cached {
 		return value
 	}
 	// If the object was destructed in *this* block (and potentially resurrected),
@@ -185,6 +217,7 @@ func (s *stateObject) GetCommittedState(key common.Hash) common.Hash {
 	//   2) we don't have new values, and can deliver empty response back
 	if _, destructed := s.db.stateObjectsDestruct[s.address]; destructed {
 		s.originStorage[key] = common.Hash{} // track the empty slot as origin value
+		s.originProofStorage[key] = common.Hash{}
 		return common.Hash{}
 	}
 	// If no live objects are available, attempt to use snapshots
@@ -204,6 +237,17 @@ func (s *stateObject) GetCommittedState(key common.Hash) common.Hash {
 				s.db.setError(err)
 			}
 			value.SetBytes(content)
+		} else {
+			enc, err = s.db.snap.Proof(s.addrHash, crypto.Keccak256Hash(key.Bytes()))
+			s.db.SnapshotProofReads += time.Since(start)
+
+			if len(enc) > 0 {
+				_, content, _, err := rlp.Split(enc)
+				if err != nil {
+					s.db.setError(err)
+				}
+				value.SetBytes(content)
+			}
 		}
 	}
 	// If the snapshot is unavailable or reading from it fails, load from the database.
@@ -383,6 +427,11 @@ func (s *stateObject) updateTrie() (Trie, error) {
 			return nil, err
 		}
 		s.db.StorageDeleted.Add(1)
+		if err := tr.DeleteProof(s.address, key[:]); err != nil {
+			s.db.setError(err)
+			return nil, err
+		}
+		s.db.ProofDeleted.Add(1)
 	}
 	if s.db.prefetcher != nil {
 		s.db.prefetcher.used(s.addrHash, s.data.Root, used)
